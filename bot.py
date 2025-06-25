@@ -536,8 +536,12 @@ def identificar_activo_en(ticker):
 # ------------------------------------------------------------------------------
 # 9. ARRANQUE
 # ------------------------------------------------------------------------------
-if __name__ == "__main__":
-    # inicia el hilo keep-alive
+@app.route('/ping', methods=['GET'])
+def ping():
+    return 'pong', 200
+
+if __name__ == '__main__':
     threading.Thread(target=_keep_alive, daemon=True).start()
     port = int(os.environ.get("PORT", 1000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port)
+
