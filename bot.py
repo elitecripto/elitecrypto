@@ -42,7 +42,7 @@ def webhook():
     print(f"[DEBUG] Datos recibidos: {data}")
     return process_signal(data)
 
-@@app.route("/ping", endpoint="ping2", methods=["GET"])
+@app.route("/ping", endpoint="ping2", methods=["GET"])
 def ping():
     return "pong", 200
 
