@@ -1,8 +1,9 @@
 from flask import Flask, request
 from datetime import datetime
-import requests, os, threading, time   # ← añade  threading, time
-import json
+import requests, os, threading, time, json
 
+# importa tu módulo de Google Sheets
+from google_sheets import cargar_estado_desde_google, guardar_estado_en_google
 
 app = Flask(__name__)
 
@@ -11,71 +12,49 @@ app = Flask(__name__)
 # ------------------------------------------------------------------------------
 BOT_TOKEN_ELITE = "7494590590:AAGjQU9vkmCaPfI-vIfly-PfHrEme27v4XE"
 
-# [ESPAÑOL] IDs de grupo y canal
-GROUP_CHAT_ID_ES = "-1002437381292"      # Grupo en español
-CHANNEL_CHAT_ID_ES = "-1002440626725"    # Canal en español 
+# IDs de grupo y canal (ES / EN)
+GROUP_CHAT_ID_ES   = "-1002437381292"
+CHANNEL_CHAT_ID_ES = "-1002440626725"
+GROUP_CHAT_ID_EN   = "-1002432864193"
+CHANNEL_CHAT_ID_EN = "-1002288256984"
 
-# Tópicos/hilos en el grupo ES
-TOPICS_ES = {
-    "BTC": 2,
-    "ETH": 4,
-    "ADA": 5,
-    "XRP": 6,
-    "BNB": 7
-}
+TOPICS_ES = {"BTC":2,"ETH":4,"ADA":5,"XRP":6,"BNB":7}
+TOPICS_EN = {"BTC":5,"ETH":7,"ADA":13,"XRP":11,"BNB":9}
 
-# [INGLÉS] IDs de grupo y canal
-GROUP_CHAT_ID_EN = "-1002432864193"      # Grupo en inglés
-CHANNEL_CHAT_ID_EN = "-1002288256984"    # Canal en inglés
+WORDPRESS_ENDPOINT      = "https://cryptosignalbot.com/wp-json/dashboard/v1/recibir-senales-intradia"
+WORDPRESS_ENDPOINT_ALT  = "https://cryptosignalbot.com/wp-json/dashboard/v1/ver-historial-intradia"
 
-# Tópicos/hilos en el grupo EN
-TOPICS_EN = {
-    "BTC": 5,
-    "ETH": 7,
-    "ADA": 13,
-    "XRP": 11,
-    "BNB": 9
-}
+TELEGRAM_KEY   = "Bossio.18357009"
+APALANCAMIENTO = 3
 
-# Endpoints de WordPress
-WORDPRESS_ENDPOINT = "https://cryptosignalbot.com/wp-json/dashboard/v1/recibir-senales-intradia"
-
-# Clave secreta
-TELEGRAM_KEY = "Bossio.18357009"
-# Archivo para guardar el estado de las operaciones
-datos_guardados_file = "estado_operaciones.json"
-
-# Cargar datos si existen
-if os.path.exists(datos_guardados_file):
-    with open(datos_guardados_file, "r") as f:
+# ------------------------------------------------------------------------------
+# 1bis. Persistencia local en JSON (por si acaso)
+# ------------------------------------------------------------------------------
+DATOS_FILE = "estado_operaciones.json"
+if os.path.exists(DATOS_FILE):
+    with open(DATOS_FILE, "r") as f:
         try:
-            data_json = json.load(f)
-            precios_entrada = data_json.get("precios_entrada", {})
-            fechas_entrada = data_json.get("fechas_entrada", {})
-        except json.JSONDecodeError:
-            precios_entrada = {}
-            fechas_entrada = {}
+            d = json.load(f)
+            precios_entrada = d.get("precios_entrada", {})
+            fechas_entrada  = d.get("fechas_entrada", {})
+        except:
+            precios_entrada, fechas_entrada = {}, {}
 else:
-    precios_entrada = {}
-    fechas_entrada = {}
+    precios_entrada, fechas_entrada = cargar_estado_desde_google()
 
-# Función para guardar datos persistentes
-def guardar_estado():
-    with open(datos_guardados_file, "w") as f:
+def guardar_estado_local():
+    with open(DATOS_FILE, "w") as f:
         json.dump({
             "precios_entrada": precios_entrada,
             "fechas_entrada": fechas_entrada
         }, f)
 
-# Apalancamiento
-APALANCAMIENTO = 3
-
 # ------------------------------------------------------------------------------
-# 2. RUTA PRINCIPAL DEL SERVIDOR FLASK
+# 2. RUTA PRINCIPAL
 # ------------------------------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
+    data = request.json or {}
     print(f"[DEBUG] Datos recibidos: {data}")
     return process_signal(data)
 
@@ -85,150 +64,117 @@ def webhook():
 def process_signal(data):
     global precios_entrada, fechas_entrada
 
-    ticker = data.get('ticker', 'No especificado')
-    action = data.get('order_action', '').lower()  # "buy", "sell", "close"
-    order_price = data.get('order_price', None)
-    # Aunque llegue 'stop_loss' desde TradingView, ahora lo calculamos al 2%
-    _ = data.get('stop_loss', None)  # Se ignora el original; sólo para referencia
+    ticker    = data.get('ticker', '').upper()
+    action    = data.get('order_action', '').lower()
+    raw_price = data.get('order_price')
 
-    if not order_price:
+    # validación básica
+    try:
+        order_price = float(raw_price)
+    except:
         return "Precio no proporcionado", 400
 
-    # Identificar activo en ES
-    asset_es, topic_id_es = identificar_activo_es(ticker)
-    # Identificar activo en EN
-    asset_en, topic_id_en = identificar_activo_en(ticker)
-
-    if not asset_es or not asset_en:
+    # identifica activo
+    asset_es, tid_es = identificar_activo_es(ticker)
+    asset_en, tid_en = identificar_activo_en(ticker)
+    if not asset_es:
         return "Activo no reconocido", 400
 
-    fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+    today = datetime.now().strftime("%d/%m/%Y")
 
-# --------------------------------------------------------------------------
-# A) LÓGICA PARA BUY
-# --------------------------------------------------------------------------
+    # ---------------- BUY ----------------
     if action == "buy":
-        # ✅ Verificar si ya hay una operación abierta para este activo
         if precios_entrada.get(asset_es) is not None:
-            print(f"[DEBUG] Ya existe una operación abierta para {asset_es}, ignorando señal duplicada.")
-            return "Duplicada: operación ya abierta", 200
+            return "Duplicada", 200
 
-        # Se calcula el Stop Loss al 20% por debajo del precio de entrada
-        stop_loss_value = round(float(order_price) * 0.80, 4)
+        stop = round(order_price * 0.80, 4)
+        precios_entrada[asset_es] = order_price
+        fechas_entrada[asset_es]  = today
 
-        precios_entrada[asset_es] = float(order_price)
-        fechas_entrada[asset_es] = fecha_hoy
-        guardar_estado()
+        # ** GRABO EN GOOGLE SHEETS **
+        guardar_estado_en_google(precios_entrada, fechas_entrada)
+        # y opcionalmente local
+        guardar_estado_local()
 
-        # Mensaje en español
-        mensaje_compra_es = construir_mensaje_compra_es(asset_es, order_price, stop_loss_value, fecha_hoy)
-        # Mensaje en inglés
-        mensaje_compra_en = build_buy_message_en(asset_en, order_price, stop_loss_value, fecha_hoy)
+        # mensajes y envíos...
+        msg_es = construir_mensaje_compra_es(asset_es, order_price, stop, today)
+        msg_en = build_buy_message_en(asset_en, order_price, stop, today)
+        send_telegram_group_message_with_button_es(GROUP_CHAT_ID_ES, tid_es, msg_es)
+        send_telegram_group_message_with_button_en(GROUP_CHAT_ID_EN, tid_en, msg_en)
 
-        # Enviar mensajes al grupo
-        send_telegram_group_message_with_button_es(GROUP_CHAT_ID_ES, topic_id_es, mensaje_compra_es)
-        send_telegram_group_message_with_button_en(GROUP_CHAT_ID_EN, topic_id_en, mensaje_compra_en)
-
-        # Enviar a WordPress
-        payload_wp = {
+        payload = {
             "telegram_key": TELEGRAM_KEY,
             "symbol": asset_es,
             "action": action,
             "price": order_price,
-            "stop_loss": stop_loss_value,
-            "strategy": "fire_scalping"
+            "stop_loss": stop,
+            "strategy": "elite_scalping_pro"
         }
-        enviar_a_wordpress(WORDPRESS_ENDPOINT, payload_wp)
-        enviar_a_wordpress(WORDPRESS_ENDPOINT_ALT, payload_wp)
+        enviar_a_wordpress(WORDPRESS_ENDPOINT,     payload)
+        enviar_a_wordpress(WORDPRESS_ENDPOINT_ALT, payload)
 
         return "OK", 200
-    # --------------------------------------------------------------------------
-    # B) LÓGICA PARA SELL / CLOSE
-    # --------------------------------------------------------------------------
-    if action in ["sell", "close"]:
-        if asset_es in precios_entrada and precios_entrada[asset_es] is not None:
-            precio_entrada = precios_entrada[asset_es]
-            precio_salida = float(order_price)
-            fecha_entrada_op = fechas_entrada.get(asset_es, "Desconocida")
-            guardar_estado()
 
-            profit_percent = ((precio_salida - precio_entrada) / precio_entrada) * 100
-            profit_percent_leveraged = profit_percent * APALANCAMIENTO
+    # --------------- SELL / CLOSE ---------------
+    if action in ("sell","close"):
+        if precios_entrada.get(asset_es) is None:
+            return "No hay posición abierta", 400
 
-            # Mensajes en español (cierre)
-            mensaje_cierre_es = construir_mensaje_cierre_es(
-                asset_es, precio_entrada, precio_salida,
-                profit_percent_leveraged, fecha_entrada_op, fecha_hoy
-            )
-            if profit_percent_leveraged >= 0:
-                mensaje_canal_es = construir_mensaje_ganancia_canal_es(
-                    asset_es, precio_entrada, precio_salida,
-                    profit_percent_leveraged, fecha_entrada_op, fecha_hoy
-                )
-            else:
-                mensaje_canal_es = construir_mensaje_perdida_canal_es(
-                    asset_es, precio_entrada, precio_salida,
-                    profit_percent_leveraged, fecha_entrada_op, fecha_hoy
-                )
+        entry = precios_entrada[asset_es]
+        exit_ = order_price
+        entry_date = fechas_entrada.get(asset_es)
+        pnl_pct = (exit_ - entry) / entry * 100 * APALANCAMIENTO
 
-            # Mensajes en inglés (cierre)
-            mensaje_cierre_en = build_close_message_en(
-                asset_en, precio_entrada, precio_salida,
-                profit_percent_leveraged, fecha_entrada_op, fecha_hoy
-            )
-            if profit_percent_leveraged >= 0:
-                mensaje_canal_en = build_profit_channel_msg_en(
-                    asset_en, precio_entrada, precio_salida,
-                    profit_percent_leveraged, fecha_entrada_op, fecha_hoy
-                )
-            else:
-                mensaje_canal_en = build_loss_channel_msg_en(
-                    asset_en, precio_entrada, precio_salida,
-                    profit_percent_leveraged, fecha_entrada_op, fecha_hoy
-                )
+        # reset
+        precios_entrada[asset_es] = None
+        fechas_entrada[asset_es]  = None
+        guardar_estado_en_google(precios_entrada, fechas_entrada)
+        guardar_estado_local()
 
-            # Enviar a grupo ES y canal ES
-            send_telegram_group_message_with_button_es(GROUP_CHAT_ID_ES, topic_id_es, mensaje_cierre_es)
-            send_telegram_channel_message_with_button_es(CHANNEL_CHAT_ID_ES, mensaje_canal_es)
+        # mensajes...
+        msg_es = construir_mensaje_cierre_es(asset_es, entry, exit_, pnl_pct, entry_date, today)
+        msg_en = build_close_message_en(asset_en, entry, exit_, pnl_pct, entry_date, today)
+        send_telegram_group_message_with_button_es(GROUP_CHAT_ID_ES, tid_es, msg_es)
+        send_telegram_group_message_with_button_en(GROUP_CHAT_ID_EN, tid_en, msg_en)
 
-            # Enviar a grupo EN y canal EN
-            send_telegram_group_message_with_button_en(GROUP_CHAT_ID_EN, topic_id_en, mensaje_cierre_en)
-            send_telegram_channel_message_with_button_en(CHANNEL_CHAT_ID_EN, mensaje_canal_en)
-
-            # Reseteamos
-            precios_entrada[asset_es] = None
-            fechas_entrada[asset_es] = None
-
-            # WordPress
-            wp_result = round(profit_percent_leveraged, 2)
-            payload_wp = {
-                "telegram_key": TELEGRAM_KEY,
-                "symbol": asset_es,
-                "action": action,
-                "price": order_price,
-                "strategy": "fire_scalping",
-                "result": wp_result
-            }
-            enviar_a_wordpress(WORDPRESS_ENDPOINT, payload_wp)
-            enviar_a_wordpress(WORDPRESS_ENDPOINT_ALT, payload_wp)
-
-            return "OK", 200
+        # canal
+        if pnl_pct >= 0:
+            ch_es = construir_mensaje_ganancia_canal_es(asset_es, entry, exit_, pnl_pct, entry_date, today)
+            ch_en = build_profit_channel_msg_en(asset_en, entry, exit_, pnl_pct, entry_date, today)
         else:
-            return "No hay posición abierta para cerrar", 400
+            ch_es = construir_mensaje_perdida_canal_es(asset_es, entry, exit_, pnl_pct, entry_date, today)
+            ch_en = build_loss_channel_msg_en(asset_en, entry, exit_, pnl_pct, entry_date, today)
+
+        send_telegram_channel_message_with_button_es(CHANNEL_CHAT_ID_ES, ch_es)
+        send_telegram_channel_message_with_button_en(CHANNEL_CHAT_ID_EN, ch_en)
+
+        payload = {
+            "telegram_key": TELEGRAM_KEY,
+            "symbol": asset_es,
+            "action": action,
+            "price": order_price,
+            "strategy": "elite_scalping_pro",
+            "result": round(pnl_pct,2)
+        }
+        enviar_a_wordpress(WORDPRESS_ENDPOINT,     payload)
+        enviar_a_wordpress(WORDPRESS_ENDPOINT_ALT, payload)
+
+        return "OK", 200
 
     return "OK", 200
 
-# ───────── función keep-alive cada 5 min ─────────
+# ───────────────────────────────────────────────────────────────────────────────
+# 4. KEEP-ALIVE (ping cada 5′)
+# ───────────────────────────────────────────────────────────────────────────────
 def _keep_alive():
     url = os.getenv("KEEPALIVE_URL", "https://elitecrypto.onrender.com/ping")
     while True:
         try:
             r = requests.get(url, timeout=10)
-            print(f"[KEEPALIVE] {r.status_code} → {url}")
+            print(f"[KEEPALIVE] {r.status_code}")
         except Exception as e:
             print(f"[KEEPALIVE] Error: {e}")
-        time.sleep(300)   # 5 minutos
-
+        time.sleep(300)
 
 # ------------------------------------------------------------------------------
 # 4. FUNCIONES MENSAJES (ESPAÑOL)
