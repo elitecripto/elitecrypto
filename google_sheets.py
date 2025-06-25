@@ -18,16 +18,13 @@ SHEET_NAME  = os.getenv("GOOGLE_SHEETS_NAME", "EstadoOperaciones")
 
 # ---------- Credenciales -------------------
 def _ensure_creds_file() -> str:
-    # 1) JSON en variable de entorno
-    if CREDS_JSON:
+    if CREDS_JSON:                                  # JSON en variable
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
         tmp.write(CREDS_JSON.encode())
         tmp.close()
         return tmp.name
-    # 2) Archivo físico en imagen
-    if os.path.exists(CREDS_FILE):
+    if os.path.exists(CREDS_FILE):                  # archivo físico
         return CREDS_FILE
-    # 3) Ninguna fuente disponible
     raise FileNotFoundError(
         "❌ Credenciales de Google Sheets no encontradas.\n"
         "• Sube credenciales_google.json o crea GOOGLE_CREDS_JSON."
@@ -55,14 +52,14 @@ def cargar_estado_desde_google():
 def guardar_estado_en_google(precios, fechas):
     sheet = conectar_hoja()
 
-    # 1. Asegurar cabecera
+    # 1. asegurar cabecera
     if sheet.row_count == 0 or sheet.cell(1, 1).value != "asset":
         sheet.update("A1:C1", [["asset", "entry_price", "entry_date"]])
 
-    # 2. Índice actual (asset → fila)
-    records = sheet.get_all_records()                    # list[dict]
+    # 2. leer datos actuales para saber qué filas modificar
+    records = sheet.get_all_records()               # list[dict]
     index_by_asset = {row["asset"]: idx + 2 for idx, row in enumerate(records)}
-    # (+2 porque fila 1 = cabecera)
+    # fila real = idx + 2 (porque header es fila 1)
 
     for asset in precios:
         precio = precios[asset]
