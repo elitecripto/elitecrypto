@@ -1,8 +1,8 @@
 from flask import Flask, request
-import requests
-import os
 from datetime import datetime
+import requests, os, threading, time   # ← añade  threading, time
 import json
+
 
 app = Flask(__name__)
 
@@ -217,6 +217,18 @@ def process_signal(data):
             return "No hay posición abierta para cerrar", 400
 
     return "OK", 200
+
+# ───────── función keep-alive cada 5 min ─────────
+def _keep_alive():
+    url = os.getenv("KEEPALIVE_URL", "https://elitecrypto.onrender.com/ping")
+    while True:
+        try:
+            r = requests.get(url, timeout=10)
+            print(f"[KEEPALIVE] {r.status_code} → {url}")
+        except Exception as e:
+            print(f"[KEEPALIVE] Error: {e}")
+        time.sleep(300)   # 5 minutos
+
 
 # ------------------------------------------------------------------------------
 # 4. FUNCIONES MENSAJES (ESPAÑOL)
@@ -575,10 +587,11 @@ def identificar_activo_en(ticker):
     else:
         return (None, None)
 
-# ------------------------------------------------------------------
-# 9. EJECUCIÓN DEL SERVIDOR FLASK
-# ------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 9. ARRANQUE
+# ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    threading.Thread(target=_keep_alive, daemon=True).start()   #  ← NUEVA línea
+    # inicia el hilo keep-alive
+    threading.Thread(target=_keep_alive, daemon=True).start()
     port = int(os.environ.get("PORT", 1000))
     app.run(host="0.0.0.0", port=port)
