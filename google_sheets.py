@@ -1,87 +1,86 @@
-# google_sheets.py – versión robusta (evita cabeceras duplicadas)
-import os, tempfile, gspread
+import os
+import tempfile
+from datetime import datetime
+import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
+# ------------- Configuración Google Sheets -------------
+SCOPE       = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+CREDS_FILE  = os.getenv("GOOGLE_CREDS_FILENAME","credenciales_google.json")
+CREDS_JSON  = os.getenv("GOOGLE_CREDS_JSON")
+SHEET_NAME  = os.getenv("GOOGLE_SHEETS_NAME","RegistroOperaciones")
 
-CREDS_FILE = os.getenv("GOOGLE_CREDS_FILENAME", "credenciales_google.json")
-CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
-SHEET_NAME = os.getenv("GOOGLE_SHEETS_NAME", "EstadoOperaciones")
+# MISMO APALANCAMIENTO: 3×
+LEVERAGE    = 3
 
-# ---------- credenciales ----------
 def _ensure_creds_file() -> str:
     if CREDS_JSON:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-        tmp.write(CREDS_JSON.encode())
-        tmp.close()
+        tmp = tempfile.NamedTemporaryFile(delete=False,suffix=".json")
+        tmp.write(CREDS_JSON.encode()); tmp.close()
         return tmp.name
     if os.path.exists(CREDS_FILE):
         return CREDS_FILE
-    raise FileNotFoundError(
-        "❌ Credenciales de Google Sheets no encontradas.\n"
-        "• Sube credenciales_google.json o crea GOOGLE_CREDS_JSON."
-    )
+    raise FileNotFoundError("No se encontraron credenciales de Google Sheets.")
 
 CREDS_PATH = _ensure_creds_file()
 
-
-# ---------- helpers ----------
 def conectar_hoja():
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_PATH, SCOPE)
+    creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDS_PATH,SCOPE)
     client = gspread.authorize(creds)
-    return client.open(SHEET_NAME).sheet1
+    sheet  = client.open(SHEET_NAME).sheet1
 
+    header = [
+        "activo",
+        "precio_entrada",
+        "fecha_hora_entrada",
+        "precio_salida",
+        "fecha_hora_salida",
+        "stop_programada",
+        "profit_pct"
+    ]
+    if sheet.row_count == 0 or sheet.row_values(1) != header:
+        sheet.clear()
+        sheet.append_row(header)
+    return sheet
 
-EXPECTED = ["asset", "entry_price", "entry_date"]  # cabeceras oficiales
+def registrar_entrada(activo: str, precio: float):
+    sheet = conectar_hoja()
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+    fila  = [activo, precio, fecha, "", "", "", ""]
+    sheet.append_row(fila)
 
+def registrar_salida(activo: str, precio: float):
+    sheet  = conectar_hoja()
+    fecha  = datetime.now().strftime("%Y-%m-%d %H:%M")
+    data   = sheet.get_all_records()
 
-def _asegurar_header(sheet):
-    """ Garantiza que la fila 1 tenga solo las cabeceras oficiales. """
-    header = sheet.row_values(1)
-    if header != EXPECTED:
-        # Borra fila 1 completa y escribe cabeceras correctas
-        sheet.delete_rows(1)
-        sheet.insert_row(EXPECTED, 1)
+    for idx in range(len(data)-1, -1, -1):
+        row = data[idx]
+        if row["activo"] == activo and row["precio_salida"] == "":
+            fila_num = idx + 2  # +2 por cabecera
 
+            # 1) precio_salida y fecha
+            sheet.update_cell(fila_num, 4, precio)
+            sheet.update_cell(fila_num, 5, fecha)
 
-# ---------- cargar estado ----------
-def cargar_estado_desde_google():
-    hoja = conectar_hoja()
-    _asegurar_header(hoja)
+            # 2) precio de entrada
+            entry_price = float(str(sheet.cell(fila_num,2).value).replace(",", "."))
 
-    data = hoja.get_all_records(expected_headers=EXPECTED)
-    precios, fechas = {}, {}
-    for row in data:
-        precios[row["asset"]] = (
-            float(row["entry_price"]) if row["entry_price"] else None
-        )
-        fechas[row["asset"]] = row["entry_date"] or None
-    return precios, fechas
+            # 3) stop_programada = entrada * 0.80 (–20%)
+            stop_prog = round(entry_price * 0.80, 6)
+            sheet.update_cell(fila_num, 6, stop_prog)
 
+            # 4) profit_pct = raw_pct × LEVERAGE
+            exit_price = float(str(precio).replace(",", "."))
+            raw_pct    = (exit_price - entry_price) / entry_price * 100
+            profit_pct = round(raw_pct * LEVERAGE, 2)
+            sheet.update_cell(fila_num, 7, profit_pct)
 
-# ---------- guardar estado ----------
-def guardar_estado_en_google(precios, fechas):
-    hoja = conectar_hoja()
-    _asegurar_header(hoja)
+            # 5) colorear fila
+            color = {"backgroundColor": {"red":1, "green":0, "blue":0}} if profit_pct < 0 \
+                 else {"backgroundColor": {"red":0, "green":1, "blue":0}}
+            sheet.format(f"A{fila_num}:G{fila_num}", color)
 
-    # lee filas existentes evitando error de duplicados
-    records = hoja.get_all_records(expected_headers=EXPECTED)
-    index = {row["asset"]: i + 2 for i, row in enumerate(records)}  # fila real
+            return
 
-    for asset in precios:
-        precio, fecha = precios[asset], fechas[asset]
-        fila = index.get(asset)
-
-        if precio is None:
-            # cierre de posición: elimina fila si existe
-            if fila:
-                hoja.delete_rows(fila)
-            continue
-
-        if fila:
-            hoja.update(f"A{fila}:C{fila}", [[asset, precio, fecha]])
-        else:
-            hoja.append_row([asset, precio, fecha])
+    raise ValueError(f"No hay operación abierta para '{activo}'.")
