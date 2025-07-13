@@ -24,8 +24,8 @@ CHANNEL_CHAT_ID_EN = "-1002288256984"
 TOPICS_ES = {"BTC":2,"ETH":4,"ADA":5,"XRP":6,"BNB":7}
 TOPICS_EN = {"BTC":5,"ETH":7,"ADA":13,"XRP":11,"BNB":9}
 
-WORDPRESS_ENDPOINT      = "https://cryptosignalbot.com/wp-json/dashboard/v1/recibir-senales-intradia"
-WORDPRESS_ENDPOINT_ALT  = "https://cryptosignalbot.com/wp-json/dashboard/v1/ver-historial-intradia"
+WORDPRESS_ENDPOINT      = "hhttps://cryptosignalbot.com/wp-json/dashboard/v1/recibir-senales-fire"
+WORDPRESS_ENDPOINT_ALT  = "https://cryptosignalbot.com/wp-json/dashboard/v1/ver-historial-fire"
 
 TELEGRAM_KEY   = "Bossio.18357009"
 APALANCAMIENTO = 3
